@@ -209,9 +209,11 @@ def build_schedule_prompt(clean_df: pd.DataFrame, led_label: str) -> list[dict]:
 # --------------------------------------------------------------------
 
 def render_home() -> None:
-    st.title("💡 LED Brightness – 24 h Trend")
+    from datetime import datetime
 
-    # 1️⃣ Fixture selector
+    st.title("💡 LED Brightness – 24 h Trend")
+
+    # 1️⃣ Fixture selector
     led_lookup = fetch_led_list()
     if not led_lookup:
         st.error("No LEDs returned by the API.")
@@ -223,79 +225,80 @@ def render_home() -> None:
         format_func=led_lookup.get,
     )
 
-    # 2️⃣ Data fetch + placeholders
-    hist_df   = fetch_history_df(selected_id)
-
-    # 👉 2a.  Convert the timestamp index from UTC → IST  ----------------
+    # 2️⃣ Fetch history
+    hist_df = fetch_history_df(selected_id)
+    if not hist_df.empty and hist_df.index.tz is None:
+        hist_df.index = hist_df.index.tz_localize("UTC")
     if not hist_df.empty:
-        # If the index is naïve (no tzinfo) first localise to UTC
-        if hist_df.index.tz is None:
-            hist_df.index = hist_df.index.tz_localize("UTC")
-        # Convert to IST
         hist_df.index = hist_df.index.tz_convert(IST)
-    # ------------------------------------------------------------------
 
     latest_lv = int(hist_df["level"].iloc[-1]) if not hist_df.empty else None
 
-    metric_ph = st.empty()   # KPI placeholder
-    chart_ph  = st.empty()   # Chart placeholder
+    # ── session state for mode ─────────────────────────────────────────
+    mode_key = f"manual_mode_{selected_id}"
+    if mode_key not in st.session_state:
+        st.session_state[mode_key] = False  # False → Auto
 
-    # 3️⃣ KPI (single line, no columns)
-    metric_ph.metric(
-        label="Current brightness",
-        value=f"{latest_lv} %" if latest_lv is not None else "—",
-    )
+    # 3️⃣ KPIs with placeholders
+    col_bri, col_mode = st.columns(2)
+    bri_ph  = col_bri.empty()
+    mode_ph = col_mode.empty()
 
-    # 4️⃣ Manual override (own block, no columns)
+    # initial render
+    bri_ph.metric("Current brightness", f"{latest_lv} %" if latest_lv is not None else "—")
+    mode_ph.metric("Mode", "Manual" if st.session_state[mode_key] else "Auto")
+
+    # 4️⃣ Manual override controls
     st.markdown("#### Manual override")
-
     new_level = st.slider(
         "Brightness (%)",
-        min_value=0,
-        max_value=100,
-        value=latest_lv or 50,
-        step=1,
+        0, 100, latest_lv or 50, 1,
         key="override_slider",
         label_visibility="collapsed",
     )
 
-    # 👉 Two buttons side‑by‑side
     col_apply, col_auto = st.columns(2)
 
     with col_apply:
         if st.button("Apply", key="override_apply"):
             if override_brightness(selected_id, new_level):
-                register_manual(selected_id, datetime.utcnow())  # stamp manual mode
-                st.success(f"Brightness set to {new_level}%")
+                register_manual(selected_id, datetime.utcnow())
+                st.session_state[mode_key] = True     # now Manual
 
-                metric_ph.metric("Current brightness", f"{new_level} %")
+                st.success(f"Brightness set to {new_level}%")
+                # update placeholders (no duplicate rows)
+                bri_ph.metric("Current brightness", f"{new_level} %")
+                mode_ph.metric("Mode", "Manual")
+
+                # optimistic chart update
                 if not hist_df.empty:
-                    hist_df.loc[datetime.now(IST)] = new_level   # optimistic chart
-                    chart_ph.line_chart(hist_df["level"])
+                    hist_df.loc[datetime.now(IST)] = new_level
             else:
                 st.error("Failed to apply override")
 
     with col_auto:
         if st.button("Back to auto", key="auto_mode"):
             if switch_to_auto(selected_id):
+                st.session_state[mode_key] = False    # back to Auto
                 st.success("Switched to auto‑brightness")
+                # update placeholders
+                mode_ph.metric("Mode", "Auto")
             else:
                 st.error("Failed to switch to auto")
 
-    # 5️⃣ 24‑hour chart
+    # 5️⃣ Chart
     if hist_df.empty:
         st.info("No brightness records for the past 24 hours.")
     else:
-        chart_ph.line_chart(hist_df["level"])
+        st.line_chart(hist_df["level"])
 
-    
-
-    # 6️⃣ Footer (show update time in IST)
+    # 6️⃣ Footer
     st.caption(
         f"Data window: last {HISTORY_WINDOW_H} h · "
         f"Updated {datetime.now(IST):%Y‑%m‑%d %H:%M IST}"
     )
-  
+
+
 def render_cost_savings() -> None:
     """
     Live cost‑savings analytics page.
